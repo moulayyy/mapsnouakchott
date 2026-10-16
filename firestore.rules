@@ -1,0 +1,63 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isAdmin() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Marqueur admin : créé uniquement depuis la console Firebase.
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name', 'phone', 'createdAt']);
+    }
+
+    // Index (moughataas, lotissements, plans)
+    match /meta/{doc} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Géométrie visible par les clients : uniquement les lots actifs.
+    match /geo_public/{doc} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+    // Géométrie complète (lots désactivés inclus) : admin seulement.
+    match /geo_all/{doc} {
+      allow read, write: if isAdmin();
+    }
+
+    // Détails d'un lot (prix, photos, actif). Un lot désactivé est invisible aux clients.
+    match /lots/{key} {
+      allow get: if signedIn() && (resource == null || resource.data.active != false || isAdmin());
+      allow list: if isAdmin() || (signedIn() && resource.data.active == true);
+      allow write: if isAdmin();
+    }
+
+    // Propriétaire et notes privées : admin seulement.
+    match /lots_private/{key} {
+      allow read, write: if isAdmin();
+    }
+
+    // Chat : un client ne voit que sa conversation, l'admin voit tout.
+    match /chats/{uid} {
+      allow read, write: if signedIn() && (request.auth.uid == uid || isAdmin());
+      match /messages/{id} {
+        allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+        allow create: if signedIn() && (
+          (request.auth.uid == uid && request.resource.data.from == 'client') ||
+          (isAdmin() && request.resource.data.from == 'admin'));
+        allow update, delete: if false;
+      }
+    }
+  }
+}
