@@ -135,6 +135,19 @@ class _LotEditPageState extends State<LotEditPage> {
                   onChanged: (v) => setState(() => _d.offer = v),
                 ),
                 const SizedBox(height: 12),
+                DropdownButtonFormField<String?>(
+                  initialValue: _d.construction,
+                  decoration: const InputDecoration(
+                      labelText: 'Terrain (visible sur les annonces)',
+                      border: OutlineInputBorder()),
+                  items: const [
+                    DropdownMenuItem(value: null, child: Text('Non précisé')),
+                    DropdownMenuItem(value: 'libre', child: Text('Libre (aucune construction)')),
+                    DropdownMenuItem(value: 'construit', child: Text('Construit')),
+                  ],
+                  onChanged: (v) => setState(() => _d.construction = v),
+                ),
+                const SizedBox(height: 12),
                 TextField(
                   controller: _price,
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),

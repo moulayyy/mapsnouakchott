@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
@@ -14,6 +15,9 @@ class FocusRequest {
   final String title;
   final int? moughataa;
   final int? plan;
+  final int? block;
+  final int? estBlock; // îlot estimé (n° B…)
+  final int? estLot; // parcelle estimée (n° P…)
   final Set<String>? lotKeys;
   final String? selectKey;
   final LatLng? point;
@@ -23,6 +27,9 @@ class FocusRequest {
     required this.title,
     this.moughataa,
     this.plan,
+    this.block,
+    this.estBlock,
+    this.estLot,
     this.lotKeys,
     this.selectKey,
     this.point,
@@ -31,19 +38,20 @@ class FocusRequest {
 }
 
 class AppState extends ChangeNotifier {
-  int tab = 2;
+  // 0 = Carte, 1 = Annonces, 2 = Chat, 3 = Paramètres
+  int tab = 0;
   FocusRequest? pendingFocus;
   String? chatDraft;
 
   void openMap(FocusRequest f) {
     pendingFocus = f;
-    tab = 2;
+    tab = 0;
     notifyListeners();
   }
 
   void openChat({String? draft}) {
     chatDraft = draft;
-    tab = 3;
+    tab = 2;
     notifyListeners();
   }
 
@@ -107,6 +115,48 @@ class AuthService {
     } catch (_) {
       return false;
     }
+  }
+
+  /// Fiche employé si le compte en a une et qu'elle est active, sinon null.
+  static Future<Map<String, dynamic>?> staffInfo(String uid) async {
+    try {
+      final s = await FirebaseFirestore.instance.collection('staff').doc(uid).get();
+      final d = s.data();
+      if (d == null || d['active'] != true) return null;
+      return d;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Crée un compte employé sans déconnecter l'admin (2e instance Firebase),
+  /// puis enregistre sa fiche `staff/{uid}`.
+  static Future<void> createStaff({
+    required String name,
+    required String phone,
+    required String password,
+    required List<String> permissions,
+  }) async {
+    FirebaseApp secondary;
+    try {
+      secondary = Firebase.app('staffCreator');
+    } catch (_) {
+      secondary = await Firebase.initializeApp(
+          name: 'staffCreator', options: Firebase.app().options);
+    }
+    final auth2 = FirebaseAuth.instanceFor(app: secondary);
+    final cred = await auth2.createUserWithEmailAndPassword(
+        email: emailFor(phone), password: password);
+    final uid = cred.user!.uid;
+    await cred.user!.updateDisplayName(name);
+    await auth2.signOut();
+    await FirebaseFirestore.instance.collection('staff').doc(uid).set({
+      'name': name,
+      'phone': normalizePhone(phone),
+      'permissions': permissions,
+      'active': true,
+      'createdAt': Timestamp.now(),
+    });
   }
 
   static Future<void> signOut() => _auth.signOut();

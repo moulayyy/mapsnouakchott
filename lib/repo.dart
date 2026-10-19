@@ -3,17 +3,31 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
+import 'est_models.dart';
 import 'models.dart';
 
 class Repo extends ChangeNotifier {
   final _fs = FirebaseFirestore.instance;
 
   bool isAdmin = false;
+
+  // Compte employé créé par l'admin (null = client ou admin)
+  bool isStaff = false;
+  Set<String> perms = {};
+
+  void setStaff(Map<String, dynamic>? d) {
+    isStaff = d != null;
+    perms = d == null ? {} : ((d['permissions'] as List?) ?? const []).cast<String>().toSet();
+  }
+
+  bool get canChat => isAdmin || (isStaff && perms.contains('chat'));
+  bool get canRequests => isAdmin || (isStaff && perms.contains('demandes'));
   List<Moughataa> moughataas = [];
   List<Plan> plans = [];
   List<Lotissement> lotissements = [];
   List<String> kinds = [];
   List<Lot> lots = [];
+  List<Block> blocks = [];
   final Map<String, Lot> byKey = {};
 
   // Admin uniquement
@@ -49,6 +63,11 @@ class Repo extends ChangeNotifier {
     lotissements = (jsonDecode(m['lotissements']!['j'] as String) as List)
         .map((e) => Lotissement.fromRow(e as List))
         .toList();
+    blocks = m['blocks'] == null
+        ? []
+        : (jsonDecode(m['blocks']!['j'] as String) as List)
+            .map((e) => Block.fromRow(e as List))
+            .toList();
 
     final geo = await _fs.collection(admin ? 'geo_all' : 'geo_public').get();
     final all = <Lot>[];
@@ -84,6 +103,13 @@ class Repo extends ChangeNotifier {
 
   // ---------- helpers
   Plan? planOf(Lot l) => (l.plan >= 0 && l.plan < plans.length) ? plans[l.plan] : null;
+  List<Block> blocksOfPlan(int plan) => blocks.where((b) => b.plan == plan).toList();
+  Block? blockOf(int plan, int n) {
+    for (final b in blocks) {
+      if (b.plan == plan && b.n == n) return b;
+    }
+    return null;
+  }
   Moughataa? moughataa(int code) {
     for (final m in moughataas) {
       if (m.code == code) return m;
@@ -163,15 +189,170 @@ class Repo extends ChangeNotifier {
     });
   }
 
+  // ---------- parcelles et îlots ESTIMÉS (sans valeur juridique)
+  EstMeta? est;
+  List<EstBlock> estBlocks = [];
+  final Map<int, EstBlock> estBlockById = {};
+  bool estBlocksLoaded = false;
+  bool _estBlocksLoading = false;
+  String? estError;
+  final Map<String, List<EstLot>> _estTiles = {};
+  final Map<String, int> _estUsed = {};
+  final Set<String> _estLoading = {};
+  static const _estTileMax = 140;
+
+  /// Charge l'index et les îlots estimés (une fois, en arrière-plan).
+  Future<void> loadEstBlocks() async {
+    if (estBlocksLoaded || _estBlocksLoading) return;
+    _estBlocksLoading = true;
+    try {
+      final meta = await _fs.collection('meta').doc('est').get();
+      if (!meta.exists) {
+        estError = 'Données estimées absentes : relancer l\'import.';
+        return;
+      }
+      est = EstMeta.fromJson(jsonDecode(meta.data()!['j'] as String) as Map<String, dynamic>);
+      final snap = await _fs.collection('est_blocks').get();
+      final out = <EstBlock>[];
+      for (final d in snap.docs) {
+        for (final row in jsonDecode(d.data()['j'] as String) as List) {
+          try {
+            out.add(EstBlock.fromRow(row as List));
+          } catch (_) {}
+        }
+      }
+      estBlocks = out;
+      estBlockById
+        ..clear()
+        ..addEntries(out.map((b) => MapEntry(b.id, b)));
+      estBlocksLoaded = true;
+      estError = null;
+    } catch (e) {
+      estError = '$e';
+    } finally {
+      _estBlocksLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Charge les tuiles de parcelles manquantes (en parallèle, avec éviction des plus anciennes).
+  Future<void> ensureEstTiles(Iterable<String> keys) async {
+    final m = est;
+    if (m == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final want = <String>[];
+    for (final k in keys) {
+      _estUsed[k] = now;
+      if (!_estTiles.containsKey(k) && !_estLoading.contains(k)) want.add(k);
+    }
+    if (want.isEmpty) return;
+    _estLoading.addAll(want);
+    await Future.wait(want.take(16).map((k) async {
+      try {
+        final s = await _fs.collection('est_lots').doc(k).get();
+        final d = s.data();
+        if (d == null) {
+          _estTiles[k] = const [];
+          return;
+        }
+        final ox = (d['ox'] as num).toDouble(), oy = (d['oy'] as num).toDouble();
+        final lots = <EstLot>[];
+        for (final row in jsonDecode(d['j'] as String) as List) {
+          try {
+            lots.add(EstLot.fromRow(row as List, ox, oy));
+          } catch (_) {}
+        }
+        _estTiles[k] = lots;
+      } catch (_) {
+        // sera retentée au prochain déplacement
+      } finally {
+        _estLoading.remove(k);
+      }
+    }));
+    for (final k in want.skip(16)) {
+      _estLoading.remove(k);
+    }
+    if (_estTiles.length > _estTileMax) {
+      final old = _estTiles.keys.toList()
+        ..sort((a, b) => (_estUsed[a] ?? 0).compareTo(_estUsed[b] ?? 0));
+      for (final k in old.take(_estTiles.length - _estTileMax)) {
+        if ((_estUsed[k] ?? 0) < now) _estTiles.remove(k);
+      }
+    }
+    notifyListeners();
+  }
+
+  List<EstLot> estLotsIn(double south, double west, double north, double east, {int cap = 4000}) {
+    final m = est;
+    if (m == null) return const [];
+    final out = <EstLot>[];
+    for (final k in m.tilesIn(south, west, north, east)) {
+      final lots = _estTiles[k];
+      if (lots == null) continue;
+      for (final l in lots) {
+        if (l.maxLat < south || l.minLat > north || l.maxLon < west || l.minLon > east) continue;
+        out.add(l);
+        if (out.length >= cap) return out;
+      }
+    }
+    return out;
+  }
+
+  List<EstBlock> estBlocksIn(double south, double west, double north, double east, {int cap = 3000}) {
+    final out = <EstBlock>[];
+    for (final b in estBlocks) {
+      if (b.inCert) continue;
+      if (b.maxLat < south || b.minLat > north || b.maxLon < west || b.minLon > east) continue;
+      out.add(b);
+      if (out.length >= cap) break;
+    }
+    return out;
+  }
+
+  EstLot? estLotById(int id) {
+    for (final lots in _estTiles.values) {
+      for (final l in lots) {
+        if (l.id == id) return l;
+      }
+    }
+    return null;
+  }
+
+  /// Îlot estimé qui contient la parcelle n° [id] (d'après les plages de numéros).
+  EstBlock? estBlockForLot(int id) {
+    for (final b in estBlocks) {
+      if (b.first > 0 && id >= b.first && id <= b.last) return b;
+    }
+    return null;
+  }
+
+  String estQuartier(int? i) {
+    final q = est?.quartiers;
+    if (i == null || q == null || i < 0 || i >= q.length) return '';
+    return q[i].isNotEmpty ? q[i][0] : '';
+  }
+
+  String estStreet(EstLot l) {
+    final m = est;
+    if (m == null || l.streetName == null) return '';
+    final i = l.streetName!;
+    return (i >= 0 && i < m.streetNames.length) ? m.streetNames[i] : '';
+  }
+
   /// Offres en ligne (vente / location) visibles par tous.
   Future<List<MapEntry<String, LotDetail>>> loadOffers() async {
     final q = await _fs.collection('lots').where('active', isEqualTo: true).get();
-    final out = <MapEntry<String, LotDetail>>[];
+    final tmp = <(String, LotDetail, int)>[];
     for (final d in q.docs) {
-      final det = LotDetail.fromMap(d.data());
-      if (det.offer != null) out.add(MapEntry(d.id, det));
+      final data = d.data();
+      final det = LotDetail.fromMap(data);
+      final ts = data['updatedAt'];
+      if (det.offer != null) {
+        tmp.add((d.id, det, ts is Timestamp ? ts.millisecondsSinceEpoch : 0));
+      }
     }
-    return out;
+    tmp.sort((a, b) => b.$3.compareTo(a.$3)); // plus récentes d'abord
+    return [for (final t in tmp) MapEntry(t.$1, t.$2)];
   }
 }
 

@@ -7,6 +7,7 @@ import 'repo.dart';
 import 'screens/auth_page.dart';
 import 'screens/shell.dart';
 import 'services.dart';
+import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,10 +23,7 @@ class MapsApp extends StatelessWidget {
     return MaterialApp(
       title: AppConfig.appName,
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorSchemeSeed: const Color(0xFF2E6B7B),
-        useMaterial3: true,
-      ),
+      theme: buildTheme(),
       home: const Gate(),
     );
   }
@@ -69,7 +67,9 @@ class _LoaderState extends State<Loader> {
 
   Future<void> _load() async {
     final admin = await AuthService.isAdmin(widget.user.uid);
+    repo.setStaff(admin ? null : await AuthService.staffInfo(widget.user.uid));
     await repo.load(admin: admin);
+    repo.loadEstBlocks(); // parcelles estimées : en arrière-plan
   }
 
   @override

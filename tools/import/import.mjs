@@ -57,7 +57,115 @@ cert.forEach((r, i) => {
   byPlan.get(planIdx).push({ r, i });
 });
 
+// ---- blocs (îlots) : lots voisins reliés entre eux ; la rue sépare les blocs.
+// Retourne les blocs du plan et ajoute le n° de bloc en position 7 de chaque ligne.
+function clusterBlocks(lots, planIdx) {
+  const par = lots.map((_, i) => i);
+  const find = (x) => {
+    while (par[x] !== x) {
+      par[x] = par[par[x]];
+      x = par[x];
+    }
+    return x;
+  };
+  const union = (a, b) => {
+    a = find(a);
+    b = find(b);
+    if (a !== b) par[a] = b;
+  };
+  const kx = 111320 * Math.cos((lots[0][6][1] * Math.PI) / 180);
+  const ky = 110574;
+  const CELL = 3;
+  const TOL = 2.0;
+  const STEP = 2.0;
+  const grid = new Map();
+  const addPoint = (i, x, y) => {
+    const cx = Math.floor(x / CELL);
+    const cy = Math.floor(y / CELL);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const arr = grid.get(`${cx + dx},${cy + dy}`);
+        if (!arr) continue;
+        for (let k = 0; k < arr.length; k += 3) {
+          if (arr[k] !== i && Math.hypot(x - arr[k + 1], y - arr[k + 2]) < TOL) union(i, arr[k]);
+        }
+      }
+    }
+    const key = `${cx},${cy}`;
+    if (!grid.has(key)) grid.set(key, []);
+    grid.get(key).push(i, x, y);
+  };
+  const lotIdx = [];
+  lots.forEach((l, i) => {
+    if (l[2] !== 0) return;
+    lotIdx.push(i);
+    const ring = l[6];
+    const n = ring.length / 2;
+    for (let k = 0; k < n; k++) {
+      const x1 = ring[2 * k] * kx, y1 = ring[2 * k + 1] * ky;
+      const x2 = ring[2 * ((k + 1) % n)] * kx, y2 = ring[2 * ((k + 1) % n) + 1] * ky;
+      const steps = Math.max(1, Math.ceil(Math.hypot(x2 - x1, y2 - y1) / STEP));
+      for (let s = 0; s < steps; s++) {
+        addPoint(i, x1 + ((x2 - x1) * s) / steps, y1 + ((y2 - y1) * s) / steps);
+      }
+    }
+  });
+  const groups = new Map();
+  for (const i of lotIdx) {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(i);
+  }
+  const num = (l) => (/^\d+$/.test(l[1] ?? '') ? parseInt(l[1], 10) : null);
+  const list = [...groups.values()].map((g) => {
+    const nums = g.map((i) => num(lots[i])).filter((v) => v !== null);
+    const lat = g.reduce((s, i) => s + lots[i][6][1], 0) / g.length;
+    return { g, lo: nums.length ? Math.min(...nums) : null, hi: nums.length ? Math.max(...nums) : null, lat };
+  });
+  list.sort((a, b) => {
+    if (a.lo !== null && b.lo !== null) return a.lo - b.lo;
+    if (a.lo !== null) return -1;
+    if (b.lo !== null) return 1;
+    return b.lat - a.lat;
+  });
+  const out = [];
+  lots.forEach((l) => (l[7] = null));
+  list.forEach((b, k) => {
+    const n = k + 1;
+    const pts = [];
+    for (const i of b.g) {
+      lots[i][7] = n;
+      const r = lots[i][6];
+      for (let q = 0; q + 1 < r.length; q += 2) pts.push([r[q], r[q + 1]]);
+    }
+    out.push([planIdx, n, b.g.length, b.lo, b.hi, hull(pts)]);
+  });
+  return out;
+}
+
+function hull(points) {
+  const p = [...new Set(points.map((q) => q.join(',')))].map((s) => s.split(',').map(Number));
+  p.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (p.length < 3) return p.flat();
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [];
+  for (const q of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  const upper = [];
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+    upper.push(q);
+  }
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper).flat();
+}
+
 const geoDocs = []; // {id, data:{plan,n,j}, keys:[...]}
+const blocks = [];
 let totalLots = 0;
 for (const [planIdx, rows] of [...byPlan.entries()].sort((a, b) => a[0] - b[0])) {
   const used = new Set();
@@ -71,6 +179,13 @@ for (const [planIdx, rows] of [...byPlan.entries()].sort((a, b) => a[0] - b[0]))
     // [key,label,kind,area,status,name,ring]
     return [key, label, r[1], r[2], r[7] ?? null, r[6] ?? null, r[4]];
   });
+  const planBlocks = clusterBlocks(lots, planIdx); // ajoute le n° de bloc en [7]
+  blocks.push(...planBlocks);
+  const sizes = planBlocks.map((b) => b[2]).sort((a, b) => a - b);
+  console.log(
+    `plan ${planIdx} ${plans[planIdx]?.name}: ${lots.length} lignes, ${planBlocks.length} blocs, ` +
+      `taille médiane ${sizes[Math.floor(sizes.length / 2)] ?? 0}, max ${sizes[sizes.length - 1] ?? 0}, isolés ${sizes.filter((s) => s === 1).length}`
+  );
   totalLots += lots.length;
   for (let c = 0; c * CHUNK < lots.length; c++) {
     const slice = lots.slice(c * CHUNK, (c + 1) * CHUNK);
@@ -84,7 +199,73 @@ const metaDocs = [
   { id: 'moughataas', data: { j: JSON.stringify(moughataas.map((m) => ({ code: m.code, fr: m.fr, ar: m.ar }))) } },
   { id: 'plans', data: { j: JSON.stringify(plans), kinds } },
   { id: 'lotissements', data: { j: JSON.stringify(lotissements) } },
+  { id: 'blocks', data: { j: JSON.stringify(blocks) } },
 ];
+if (metaDocs.find((d) => d.id === 'blocks').data.j.length > 900_000) throw new Error('doc blocs trop gros');
+
+// ---- parcelles et îlots ESTIMÉS (estimation d'après rues et bâti, sans valeur juridique)
+// Îlot : [id, m, tier, module, src, nb, area, regular, first, last, galt, quartier, lts, mCorr, inCert, ring]
+const estBlockRows = rd('blocks.json');
+const certBlockIds = new Set(estBlockRows.filter((b) => b[15]).map((b) => b[0]));
+const estBlocksSorted = [...estBlockRows].sort((a, b) => a[0] - b[0]);
+const estDocs = []; // {col, id, data}
+for (let i = 0; i * 1000 < estBlocksSorted.length; i++) {
+  const rows = estBlocksSorted.slice(i * 1000, (i + 1) * 1000).map((b) => [
+    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[11], b[12], b[13], b[14], b[15], b[16],
+  ]);
+  const j = JSON.stringify(rows);
+  if (j.length > 900_000) throw new Error(`chunk d'îlots trop gros: ${i}`);
+  estDocs.push({ col: 'est_blocks', id: `b${i}`, data: { j } });
+}
+// Parcelles : tuiles de 0,005° ; origine = coin sud-ouest, anneaux en micro-degrés (comme le prototype)
+const [aoiW, aoiS] = meta.aoi;
+const tileKeys = [];
+let estLotCount = 0;
+let estLotSkipped = 0;
+for (const f of fs.readdirSync(path.join(dir, 'lots')).filter((n) => n.endsWith('.json')).sort()) {
+  const key = f.replace('.json', '');
+  const [ix, iy] = key.split('_').map(Number);
+  const rows = JSON.parse(fs.readFileSync(path.join(dir, 'lots', f), 'utf8')).filter((r) => {
+    if (certBlockIds.has(r[1])) {
+      estLotSkipped++;
+      return false; // remplacé par les lots certifiés
+    }
+    return true;
+  });
+  if (rows.length === 0) continue;
+  const j = JSON.stringify(rows);
+  if (j.length > 900_000) throw new Error(`tuile trop grosse: ${key}`);
+  estLotCount += rows.length;
+  tileKeys.push(key);
+  estDocs.push({
+    col: 'est_lots',
+    id: key,
+    data: {
+      ox: Math.round((aoiW + ix * meta.tile_deg) * 1e6) / 1e6,
+      oy: Math.round((aoiS + iy * meta.tile_deg) * 1e6) / 1e6,
+      j,
+    },
+  });
+}
+estDocs.push({
+  col: 'meta',
+  id: 'est',
+  data: {
+    j: JSON.stringify({
+      aoi: meta.aoi,
+      tileDeg: meta.tile_deg,
+      tiles: tileKeys,
+      streetNames: meta.street_names,
+      streetClasses: meta.street_classes,
+      quartiers: meta.quartiers,
+      poi: meta.poi_categories,
+    }),
+  },
+});
+console.log(
+  `Estimés: ${estBlockRows.length} îlots (${certBlockIds.size} dans le certifié, non dessinés), ` +
+    `${estLotCount} parcelles dans ${tileKeys.length} tuiles (${estLotSkipped} ignorées car dans un îlot certifié)`
+);
 
 console.log(`Plans: ${plans.length} | lotissements: ${lotissements.length} | lots (avec contour): ${totalLots}`);
 console.log(`Documents geo: ${geoDocs.length} | taille totale: ${(geoDocs.reduce((s, d) => s + d.data.j.length, 0) / 1e6).toFixed(2)} Mo`);
@@ -93,6 +274,12 @@ if (dry) {
   fs.mkdirSync('out', { recursive: true });
   for (const d of metaDocs) fs.writeFileSync(`out/meta_${d.id}.json`, JSON.stringify(d.data));
   for (const d of geoDocs) fs.writeFileSync(`out/geo_${d.id}.json`, JSON.stringify(d.data));
+  for (const d of estDocs.filter((x) => x.col === 'est_blocks' || x.id === 'est')) {
+    fs.writeFileSync(`out/${d.col}_${d.id}.json`, JSON.stringify(d.data));
+  }
+  for (const d of estDocs.filter((x) => x.col === 'est_lots').slice(0, 6)) {
+    fs.writeFileSync(`out/est_lots_${d.id}.json`, JSON.stringify(d.data));
+  }
   console.log('Mode --dry : fichiers écrits dans ./out, rien envoyé.');
   process.exit(0);
 }
@@ -135,7 +322,19 @@ for (const d of geoDocs) {
 }
 await flush();
 
+// parcelles et îlots estimés
+for (const d of estDocs) {
+  await put(db.collection(d.col).doc(d.id), d.data, JSON.stringify(d.data).length);
+}
+await flush();
+
 // supprime les anciens documents devenus inutiles
+for (const col of ['est_blocks', 'est_lots']) {
+  const keep = new Set(estDocs.filter((d) => d.col === col).map((d) => d.id));
+  for (const doc of (await db.collection(col).get()).docs) {
+    if (!keep.has(doc.id)) await doc.ref.delete();
+  }
+}
 const ids = new Set(geoDocs.map((d) => d.id));
 for (const col of ['geo_all', 'geo_public']) {
   for (const doc of (await db.collection(col).get()).docs) {

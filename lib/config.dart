@@ -21,4 +21,5 @@ class AppConfig {
   static const currency = 'MRU';
   static const center = LatLng(18.0866, -15.9785);
   static const lotMinZoom = 15.0;
+  static const labelMinZoom = 17.0;
 }
